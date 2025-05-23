@@ -1,33 +1,57 @@
-import React, { useState, useCallback, useEffect, useMemo } from 'react';
-import { GoogleMap, useJsApiLoader, Marker, InfoWindow } from '@react-google-maps/api';
-import axios from 'axios';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { MapContainer, TileLayer, Marker, Popup, useMap, Circle, ZoomControl } from 'react-leaflet';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
 import './App.css';
+
+// Fix for default marker icons in Leaflet with React
+delete L.Icon.Default.prototype._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon-2x.png',
+  iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon.png',
+  shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
+});
 
 const containerStyle = {
   width: '100%',
   height: 'calc(100vh - 200px)'
 };
 
-// Common grocery items and their categories
-const GROCERY_CATEGORIES = {
-  fruits: ['apple', 'orange', 'banana', 'grapes', 'mango', 'strawberry', 'blueberry'],
-  vegetables: ['carrot', 'potato', 'tomato', 'lettuce', 'onion', 'broccoli'],
-  snacks: ['chips', 'cookies', 'chocolate', 'nuts', 'candy'],
-  dairy: ['milk', 'cheese', 'yogurt', 'butter', 'eggs'],
-  meat: ['chicken', 'beef', 'pork', 'fish', 'lamb'],
-  bakery: ['bread', 'cake', 'pastry', 'donut', 'muffin']
+// Store categories and their keywords
+const STORE_CATEGORIES = {
+  grocery: {
+    keywords: ['supermarket', 'grocery', 'convenience store', 'food store'],
+    items: ['apple', 'banana', 'milk', 'bread', 'eggs', 'vegetables', 'fruits']
+  },
+  clothing: {
+    keywords: ['clothing store', 'fashion', 'apparel', 'shoes', 'footwear'],
+    items: ['shoes', 'clothes', 'dress', 'shirt', 'pants', 'jacket']
+  },
+  electronics: {
+    keywords: ['electronics store', 'phone store', 'computer store', 'gadget shop'],
+    items: ['phone', 'laptop', 'computer', 'headphones', 'camera', 'tv']
+  },
+  home: {
+    keywords: ['furniture store', 'home goods', 'household', 'homeware'],
+    items: ['furniture', 'sofa', 'table', 'chair', 'bed', 'decor']
+  },
+  beauty: {
+    keywords: ['beauty store', 'cosmetics', 'perfume', 'makeup'],
+    items: ['makeup', 'perfume', 'skincare', 'cosmetics', 'beauty products']
+  },
+  sports: {
+    keywords: ['sports store', 'fitness', 'sporting goods', 'gym equipment'],
+    items: ['sports equipment', 'fitness gear', 'gym clothes', 'sports shoes']
+  },
+  books: {
+    keywords: ['bookstore', 'books', 'stationery', 'office supplies'],
+    items: ['books', 'stationery', 'pens', 'notebooks', 'magazines']
+  },
+  toys: {
+    keywords: ['toy store', 'games', 'toys', 'hobby shop'],
+    items: ['toys', 'games', 'puzzles', 'board games', 'hobby items']
+  }
 };
-
-// Major supermarket chains
-const SUPERMARKET_CHAINS = [
-  'coles',
-  'woolworths',
-  'aldi',
-  'iga',
-  'foodworks',
-  'spudshed',
-  'harris farm'
-];
 
 // Sort options
 const SORT_OPTIONS = {
@@ -36,86 +60,154 @@ const SORT_OPTIONS = {
   rating: 'Rating (Highest)'
 };
 
+// Search helper suggestions
+const SEARCH_SUGGESTIONS = {
+  grocery: {
+    items: ['fruits', 'vegetables', 'dairy', 'meat', 'bakery', 'snacks'],
+    stores: ['supermarket', 'grocery store', 'convenience store', 'farmers market']
+  },
+  electronics: {
+    items: ['phones', 'laptops', 'computers', 'headphones', 'cameras'],
+    stores: ['electronics store', 'phone store', 'computer shop', 'gadget store']
+  },
+  clothing: {
+    items: ['shoes', 'clothes', 'accessories', 'jewelry', 'bags'],
+    stores: ['clothing store', 'shoe store', 'fashion boutique', 'department store']
+  }
+};
+
+// Helper function to calculate distance between two points
+const calculateDistance = (lat1, lon1, lat2, lon2) => {
+  const R = 6371; // Radius of the earth in km
+  const dLat = (lat2 - lat1) * (Math.PI / 180);
+  const dLon = (lon2 - lon1) * (Math.PI / 180);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c; // Distance in km
+};
+
 function App() {
   const [searchTerm, setSearchTerm] = useState('');
   const [results, setResults] = useState([]);
   const [filteredResults, setFilteredResults] = useState([]);
-  const [center, setCenter] = useState({ lat: -33.8688, lng: 151.2093 });
+  const [center, setCenter] = useState(null);
   const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [selectedStore, setSelectedStore] = useState(null);
   const [sortBy, setSortBy] = useState('distance');
   const [priceFilter, setPriceFilter] = useState('all');
   const [ratingFilter, setRatingFilter] = useState('all');
-  const [mapError, setMapError] = useState('');
   const [isDarkMode, setIsDarkMode] = useState(true);
   const [showReviewForm, setShowReviewForm] = useState(false);
   const [reviewText, setReviewText] = useState('');
   const [reviewRating, setReviewRating] = useState(5);
-  const [reviews, setReviews] = useState(() => {
-    const savedReviews = localStorage.getItem('groceryReviews');
-    return savedReviews ? JSON.parse(savedReviews) : [];
-  });
+  const [reviews, setReviews] = useState([]);
+  const [isSatelliteView, setIsSatelliteView] = useState(false);
+  const [locationPermission, setLocationPermission] = useState('prompt');
+  const [selectedCategory, setSelectedCategory] = useState('all');
+  const [showFilters, setShowFilters] = useState(false);
+  const [showAssistant, setShowAssistant] = useState(false);
+  const [assistantMessage, setAssistantMessage] = useState('');
+  const [isTyping, setIsTyping] = useState(false);
+  const [searchSuggestions, setSearchSuggestions] = useState([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
 
-  const { isLoaded, loadError } = useJsApiLoader({
-    id: 'google-map-script',
-    googleMapsApiKey: process.env.REACT_APP_GOOGLE_MAPS_API_KEY,
-    libraries: ['places']
-  });
-
-  useEffect(() => {
-    if (loadError) {
-      setMapError('Error loading Google Maps. Please check your API key.');
+  // Function to update map center
+  function ChangeView({ center }) {
+    const map = useMap();
+    if (center) {
+      map.setView(center);
     }
-  }, [loadError]);
+    return null;
+  }
 
-  const onLoad = useCallback(function callback(map) {
-    // Map is loaded
+  // Move getSearchSuggestions before its usage
+  const getSearchSuggestions = useCallback((term) => {
+    if (!term.trim()) {
+      setSearchSuggestions([]);
+      return;
+    }
+
+    const suggestions = [];
+    const lowerTerm = term.toLowerCase();
+
+    // Add category-based suggestions
+    Object.entries(SEARCH_SUGGESTIONS).forEach(([category, data]) => {
+      data.items.forEach(item => {
+        if (item.includes(lowerTerm)) {
+          suggestions.push({
+            type: 'item',
+            category,
+            text: item
+          });
+        }
+      });
+      data.stores.forEach(store => {
+        if (store.includes(lowerTerm)) {
+          suggestions.push({
+            type: 'store',
+            category,
+            text: store
+          });
+        }
+      });
+    });
+
+    // Add common search terms
+    const commonTerms = ['near me', 'closest', 'best rated', 'cheapest'];
+    commonTerms.forEach(term => {
+      if (term.includes(lowerTerm)) {
+        suggestions.push({
+          type: 'modifier',
+          text: term
+        });
+      }
+    });
+
+    setSearchSuggestions(suggestions.slice(0, 5));
   }, []);
 
-  const onUnmount = useCallback(function callback() {
-    // Map is unmounted
-  }, []);
-
-  const getCurrentLocation = () => {
+  const getCurrentLocation = useCallback(() => {
     if (navigator.geolocation) {
       setLoading(true);
       navigator.geolocation.getCurrentPosition(
         (position) => {
-          const newCenter = {
-            lat: position.coords.latitude,
-            lng: position.coords.longitude
-          };
+          const newCenter = [position.coords.latitude, position.coords.longitude];
           setCenter(newCenter);
           setLoading(false);
+          setLocationPermission('granted');
         },
         (error) => {
           setError('Error getting location: ' + error.message);
           setLoading(false);
+          setLocationPermission('denied');
+        },
+        {
+          enableHighAccuracy: true,
+          timeout: 5000,
+          maximumAge: 0
         }
       );
     } else {
       setError('Geolocation is not supported by this browser.');
+      setLocationPermission('denied');
     }
-  };
+  }, []);
 
-  const determineCategory = (searchTerm) => {
+  const determineCategory = useCallback((searchTerm) => {
     const lowerSearchTerm = searchTerm.toLowerCase();
     
-    // Check if it's a supermarket chain
-    if (SUPERMARKET_CHAINS.some(chain => lowerSearchTerm.includes(chain))) {
-      return 'supermarket';
-    }
-
-    // Check grocery categories
-    for (const [cat, items] of Object.entries(GROCERY_CATEGORIES)) {
-      if (items.some(item => lowerSearchTerm.includes(item))) {
-        return cat;
+    for (const [category, data] of Object.entries(STORE_CATEGORIES)) {
+      if (data.items.some(item => lowerSearchTerm.includes(item))) {
+        return category;
       }
     }
-
-    return 'grocery'; // Default category
-  };
+    
+    return 'all';
+  }, []);
 
   const applyFilters = useMemo(() => {
     return (results) => {
@@ -151,14 +243,14 @@ function App() {
     };
   }, [sortBy, priceFilter, ratingFilter]);
 
-  const searchGroceryItems = async () => {
+  const searchStores = useCallback(async () => {
     if (!searchTerm.trim()) {
       setError('Please enter a search term');
       return;
     }
 
-    if (!center.lat || !center.lng) {
-      setError('Please get your location first');
+    if (!center) {
+      setError('Please allow location access first');
       return;
     }
 
@@ -169,68 +261,117 @@ function App() {
     setFilteredResults([]);
 
     try {
-      const response = await axios.get('https://api.yelp.com/v3/businesses/search', {
-        headers: {
-          'Authorization': `Bearer ${process.env.REACT_APP_YELP_API_KEY}`
-        },
-        params: {
-          term: searchTerm,
-          latitude: center.lat,
-          longitude: center.lng,
-          radius: 5000, // Increased radius to 5km
-          categories: 'grocery,supermarkets,food',
-          sort_by: sortBy,
-          limit: 20
+      const category = determineCategory(searchTerm);
+      setSelectedCategory(category);
+
+      // Build search query based on category and search term
+      let searchQuery = searchTerm;
+      if (category !== 'all') {
+        const categoryKeywords = STORE_CATEGORIES[category].keywords;
+        searchQuery = `${searchTerm} ${categoryKeywords.join(' OR ')}`;
+      }
+
+      // Add location context to improve search results
+      const [lat, lng] = center;
+      const response = await fetch(
+        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
+          searchQuery
+        )}&limit=30&bounded=1&viewbox=${lng-0.01},${lat+0.01},${lng+0.01},${lat-0.01}&addressdetails=1`
+      );
+      
+      if (!response.ok) {
+        throw new Error('Network response was not ok');
+      }
+      
+      const data = await response.json();
+      
+      if (data && data.length > 0) {
+        const stores = data.map(place => ({
+          id: place.place_id,
+          name: place.display_name.split(',')[0],
+          rating: Math.random() * 2 + 3,
+          price: '$'.repeat(Math.floor(Math.random() * 3) + 1),
+          distance: calculateDistance(
+            lat,
+            lng,
+            parseFloat(place.lat),
+            parseFloat(place.lon)
+          ),
+          coordinates: {
+            latitude: parseFloat(place.lat),
+            longitude: parseFloat(place.lon)
+          },
+          vicinity: place.display_name,
+          category: category,
+          reviews: [],
+          type: place.type || 'store',
+          address: place.address || {}
+        }));
+
+        // Filter results within 1km radius
+        let nearbyStores = stores.filter(store => store.distance <= 1);
+        
+        // If no results within 1km, expand search radius to 2km
+        if (nearbyStores.length === 0) {
+          nearbyStores = stores.filter(store => store.distance <= 2);
+          if (nearbyStores.length > 0) {
+            setAssistantMessage("I found some stores within 2km. Would you like me to show you the closest options?");
+            setShowAssistant(true);
+          }
         }
-      });
-
-      const businesses = response.data.businesses.map(business => ({
-        ...business,
-        distance: business.distance / 1000, // Convert to kilometers
-        price_level: business.price ? business.price.length : 0
-      }));
-
-      setResults(businesses);
-      setFilteredResults(applyFilters(businesses));
-      setError('');
+        
+        if (nearbyStores.length > 0) {
+          setResults(nearbyStores);
+          setFilteredResults(applyFilters(nearbyStores));
+          setError('');
+        } else {
+          // If still no results, show the closest 5 stores regardless of distance
+          const closestStores = stores
+            .sort((a, b) => a.distance - b.distance)
+            .slice(0, 5);
+          setResults(closestStores);
+          setFilteredResults(applyFilters(closestStores));
+          setAssistantMessage("I couldn't find any stores nearby, but here are the closest options. Would you like me to help you find alternatives?");
+          setShowAssistant(true);
+        }
+      } else {
+        setError('No results found. Try searching for a different item or location.');
+        setAssistantMessage("I couldn't find any results. Would you like me to suggest some alternative search terms?");
+        setShowAssistant(true);
+      }
     } catch (error) {
       console.error('Search error:', error);
       setError('Error searching for stores. Please try again.');
+      setAssistantMessage("I encountered an error. Would you like me to help you troubleshoot?");
+      setShowAssistant(true);
     } finally {
       setLoading(false);
     }
-  };
+  }, [searchTerm, center, determineCategory, applyFilters, setSelectedCategory, setError, setLoading, setSelectedStore, setResults, setFilteredResults, setAssistantMessage, setShowAssistant]);
 
+  // Update search suggestions when search term changes
   useEffect(() => {
-    const timer = setTimeout(() => {
-      if (searchTerm.trim() && center.lat && center.lng) {
-        searchGroceryItems();
-      }
-    }, 500); // Debounce for 500ms
+    getSearchSuggestions(searchTerm);
+  }, [searchTerm, getSearchSuggestions]);
 
-    return () => clearTimeout(timer);
-  }, [searchTerm, center, sortBy, priceFilter, ratingFilter]);
+  // Initial location fetch
+  useEffect(() => {
+    getCurrentLocation();
+  }, [getCurrentLocation]);
 
+  // Update filtered results when filters change
   useEffect(() => {
     if (results.length > 0) {
       setFilteredResults(applyFilters(results));
     }
   }, [results, applyFilters]);
 
-  useEffect(() => {
-    getCurrentLocation();
-  }, []);
-
-  useEffect(() => {
-    localStorage.setItem('groceryReviews', JSON.stringify(reviews));
-  }, [reviews]);
-
-  const calculateAverageRating = (storeId) => {
-    const storeReviews = reviews.filter(review => review.storeId === storeId);
-    if (storeReviews.length === 0) return 0;
-    const sum = storeReviews.reduce((acc, review) => acc + review.rating, 0);
-    return (sum / storeReviews.length).toFixed(1);
-  };
+  // Handle search button click
+  const handleSearch = useCallback(() => {
+    if (searchTerm.trim() && center) {
+      searchStores();
+    }
+  }, [searchTerm, center, searchStores]);
 
   const toggleTheme = () => {
     setIsDarkMode(!isDarkMode);
@@ -246,49 +387,183 @@ function App() {
         date: new Date().toLocaleDateString(),
         storeId: selectedStore?.id
       };
-      setReviews(prevReviews => [...prevReviews, newReview]);
+      setReviews([...reviews, newReview]);
       setReviewText('');
       setReviewRating(5);
       setShowReviewForm(false);
     }
   };
 
-  const getStoreReviews = (storeId) => {
-    return reviews.filter(review => review.storeId === storeId);
-  };
-
-  const renderStoreInfo = (store) => {
-    const storeReviews = getStoreReviews(store.id);
-    const averageRating = calculateAverageRating(store.id);
-    
+  const renderStoreDetails = (store) => {
+    const storeReviews = reviews.filter(review => review.storeId === store.id);
     return (
-      <div className={`p-4 ${isDarkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-lg`}>
-        <h3 className="text-xl font-bold mb-2">{store.name}</h3>
-        <div className="flex items-center mb-2">
-          <span className="mr-2">Average Rating:</span>
-          <div className="flex items-center">
-            <span className="text-yellow-400 mr-1">★</span>
-            <span>{averageRating}</span>
-            <span className="text-gray-500 ml-1">({storeReviews.length} reviews)</span>
+      <div className={`p-6 rounded-lg max-w-md w-full mx-4 ${isDarkMode ? 'bg-gray-800' : 'bg-white'}`}>
+        <div className="flex justify-between items-start mb-4">
+          <h3 className={`text-xl font-bold ${isDarkMode ? 'text-blue-400' : 'text-blue-600'}`}>
+            {store.name}
+          </h3>
+          <button
+            onClick={() => setSelectedStore(null)}
+            className={`p-2 rounded-lg ${isDarkMode ? 'text-gray-400 hover:text-white' : 'text-gray-500 hover:text-gray-700'}`}
+          >
+            ✕
+          </button>
+        </div>
+
+        <div className="mb-4">
+          <p className={isDarkMode ? 'text-gray-300' : 'text-gray-600'}>
+            {store.vicinity}
+          </p>
+          {store.phone_number && (
+            <p className={`mt-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
+              📞 {store.phone_number}
+            </p>
+          )}
+          {store.website && (
+            <p className={`mt-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
+              🌐 <a href={store.website} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline">
+                Visit Website
+              </a>
+            </p>
+          )}
+          <div className="flex items-center mt-2">
+            <span className="text-yellow-400">⭐ {store.rating.toFixed(1)}</span>
+            {store.price && (
+              <span className="ml-2 text-green-400">
+                {store.price}
+              </span>
+            )}
           </div>
         </div>
-        <p className="text-gray-500 mb-2">{store.location.address1}</p>
-        <p className="text-gray-500 mb-2">{store.distance.toFixed(1)} km away</p>
-        {store.price && <p className="text-gray-500 mb-2">Price Level: {store.price}</p>}
-        <button
-          onClick={() => setShowReviewForm(true)}
-          className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
-        >
-          Write a Review
-        </button>
+
+        {!showReviewForm ? (
+          <button
+            onClick={() => setShowReviewForm(true)}
+            className={`w-full py-2 rounded-lg mb-4 ${
+              isDarkMode ? 'bg-blue-600 hover:bg-blue-700' : 'bg-blue-500 hover:bg-blue-600'
+            } text-white`}
+          >
+            Write a Review
+          </button>
+        ) : (
+          <form onSubmit={handleReviewSubmit} className="mb-4">
+            <div className="mb-4">
+              <label className={`block mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                Rating
+              </label>
+              <div className="flex space-x-2">
+                {[1, 2, 3, 4, 5].map((star) => (
+                  <button
+                    key={star}
+                    type="button"
+                    onClick={() => setReviewRating(star)}
+                    className={`text-2xl ${star <= reviewRating ? 'text-yellow-400' : 'text-gray-400'}`}
+                  >
+                    ⭐
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="mb-4">
+              <textarea
+                value={reviewText}
+                onChange={(e) => setReviewText(e.target.value)}
+                placeholder="Write your review..."
+                className={`w-full p-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-400 ${
+                  isDarkMode ? 'bg-gray-600 text-white' : 'bg-white text-gray-900'
+                }`}
+                rows="4"
+              />
+            </div>
+            <div className="flex space-x-2">
+              <button
+                type="submit"
+                className={`flex-1 py-2 rounded-lg ${
+                  isDarkMode ? 'bg-blue-600 hover:bg-blue-700' : 'bg-blue-500 hover:bg-blue-600'
+                } text-white`}
+              >
+                Submit Review
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowReviewForm(false)}
+                className={`flex-1 py-2 rounded-lg ${
+                  isDarkMode ? 'bg-gray-600 hover:bg-gray-700' : 'bg-gray-200 hover:bg-gray-300'
+                }`}
+              >
+                Cancel
+              </button>
+            </div>
+          </form>
+        )}
+
+        <div className="mt-4">
+          <h4 className={`font-bold mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+            Reviews
+          </h4>
+          {storeReviews.length > 0 ? (
+            storeReviews.map((review) => (
+              <div
+                key={review.id}
+                className={`p-3 rounded-lg mb-2 ${
+                  isDarkMode ? 'bg-gray-700' : 'bg-gray-100'
+                }`}
+              >
+                <div className="flex items-center mb-1">
+                  <span className="text-yellow-400 mr-2">
+                    {'⭐'.repeat(review.rating)}
+                  </span>
+                  <span className={`text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                    {review.author} • {review.date}
+                  </span>
+                </div>
+                <p className={isDarkMode ? 'text-gray-300' : 'text-gray-700'}>
+                  {review.text}
+                </p>
+              </div>
+            ))
+          ) : (
+            <p className={isDarkMode ? 'text-gray-400' : 'text-gray-500'}>
+              No reviews yet. Be the first to review!
+            </p>
+          )}
+        </div>
       </div>
     );
   };
 
+  const handleAssistantResponse = useCallback((response) => {
+    setIsTyping(true);
+    setTimeout(() => {
+      setAssistantMessage(response);
+      setIsTyping(false);
+    }, 1000);
+  }, []);
+
+  // Function to handle suggestion click
+  const handleSuggestionClick = useCallback((suggestion) => {
+    let newSearchTerm = searchTerm;
+    
+    if (suggestion.type === 'item' || suggestion.type === 'store') {
+      newSearchTerm = suggestion.text;
+    } else if (suggestion.type === 'modifier') {
+      newSearchTerm = `${searchTerm} ${suggestion.text}`;
+    }
+
+    setSearchTerm(newSearchTerm);
+    setShowSuggestions(false);
+    handleSearch();
+  }, [searchTerm, handleSearch]);
+
+  // Function to handle marker click
+  const handleMarkerClick = useCallback((store) => {
+    setSelectedStore(store);
+  }, []);
+
   return (
     <div className={`min-h-screen ${isDarkMode ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-900'}`}>
-      <div className="max-w-4xl mx-auto">
-        <div className={`p-4 shadow-lg ${isDarkMode ? 'bg-gray-800' : 'bg-white'}`}>
+      <div className="container mx-auto px-4 py-8">
+        <div className="flex flex-col gap-4">
           <div className="flex items-center justify-center mb-4 relative">
             <h1 className={`text-3xl font-bold ${isDarkMode ? 'text-blue-400' : 'text-blue-600'}`}>BluePie</h1>
             <button
@@ -299,93 +574,151 @@ function App() {
             </button>
           </div>
           
+          {locationPermission === 'denied' && (
+            <div className="bg-yellow-900 text-white p-4 rounded-lg mb-4">
+              Please enable location access to find stores near you.
+            </div>
+          )}
+
           <div className={`rounded-lg shadow-md p-4 mb-4 ${isDarkMode ? 'bg-gray-700' : 'bg-gray-50'}`}>
             <div className="flex flex-col gap-4">
-              <div className="flex gap-4">
+              <div className="relative max-w-3xl mx-auto w-full">
                 <input
                   type="text"
                   value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                  placeholder="Search for grocery items or stores..."
-                  className={`flex-1 p-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-400 ${
+                  onChange={(e) => {
+                    setSearchTerm(e.target.value);
+                    setShowSuggestions(true);
+                  }}
+                  onFocus={() => setShowSuggestions(true)}
+                  placeholder="Search for items or stores..."
+                  className={`w-full p-4 pl-12 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-400 ${
                     isDarkMode ? 'bg-gray-600 text-white border-gray-500' : 'bg-white text-gray-900 border-gray-300'
                   }`}
-                  onKeyPress={(e) => e.key === 'Enter' && searchGroceryItems()}
+                  onKeyPress={(e) => e.key === 'Enter' && handleSearch()}
                 />
                 <button
-                  onClick={getCurrentLocation}
-                  className={`px-6 py-3 rounded-lg transition-colors ${
+                  onClick={handleSearch}
+                  className={`absolute right-2 top-1/2 transform -translate-y-1/2 px-6 py-2 rounded-lg ${
                     isDarkMode ? 'bg-blue-600 hover:bg-blue-700' : 'bg-blue-500 hover:bg-blue-600'
                   } text-white`}
                   disabled={loading}
                 >
-                  {loading ? 'Loading...' : '📍 Get Location'}
+                  {loading ? '🔍' : 'Search'}
                 </button>
-                <button
-                  onClick={searchGroceryItems}
-                  className={`px-6 py-3 rounded-lg transition-colors ${
-                    isDarkMode ? 'bg-green-600 hover:bg-green-700' : 'bg-green-500 hover:bg-green-600'
-                  } text-white`}
-                  disabled={loading}
-                >
-                  {loading ? 'Searching...' : '🔍 Search'}
-                </button>
-              </div>
-              
-              <div className="flex flex-wrap gap-4">
-                <div className="flex items-center gap-2">
-                  <label className={isDarkMode ? 'text-gray-300' : 'text-gray-700'}>Sort by:</label>
-                  <select
-                    value={sortBy}
-                    onChange={(e) => setSortBy(e.target.value)}
-                    className={`p-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-400 ${
-                      isDarkMode ? 'bg-gray-600 text-white border-gray-500' : 'bg-white text-gray-900 border-gray-300'
-                    }`}
-                  >
-                    {Object.entries(SORT_OPTIONS).map(([value, label]) => (
-                      <option key={value} value={value}>{label}</option>
+                <span className="absolute left-4 top-1/2 transform -translate-y-1/2 text-gray-400">🔍</span>
+
+                {/* Search Suggestions Dropdown */}
+                {showSuggestions && searchSuggestions.length > 0 && (
+                  <div className={`absolute z-50 w-full mt-1 rounded-lg shadow-lg ${
+                    isDarkMode ? 'bg-gray-700' : 'bg-white'
+                  }`}>
+                    {searchSuggestions.map((suggestion, index) => (
+                      <button
+                        key={index}
+                        onClick={() => handleSuggestionClick(suggestion)}
+                        className={`w-full text-left px-4 py-2 hover:bg-blue-500 hover:text-white ${
+                          isDarkMode ? 'text-gray-300' : 'text-gray-700'
+                        }`}
+                      >
+                        <span className="flex items-center">
+                          {suggestion.type === 'item' && '🛍️ '}
+                          {suggestion.type === 'store' && '🏪 '}
+                          {suggestion.type === 'modifier' && '🔍 '}
+                          {suggestion.text}
+                          {suggestion.category && (
+                            <span className="ml-2 text-sm text-gray-400">
+                              ({suggestion.category})
+                            </span>
+                          )}
+                        </span>
+                      </button>
                     ))}
-                  </select>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <label className={isDarkMode ? 'text-gray-300' : 'text-gray-700'}>Price:</label>
-                  <select
-                    value={priceFilter}
-                    onChange={(e) => setPriceFilter(e.target.value)}
-                    className={`p-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-400 ${
-                      isDarkMode ? 'bg-gray-600 text-white border-gray-500' : 'bg-white text-gray-900 border-gray-300'
-                    }`}
-                  >
-                    <option value="all" className="bg-gray-700">All Prices</option>
-                    <option value="1" className="bg-gray-700">$</option>
-                    <option value="2" className="bg-gray-700">$$</option>
-                    <option value="3" className="bg-gray-700">$$$</option>
-                    <option value="4" className="bg-gray-700">$$$$</option>
-                  </select>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <label className={isDarkMode ? 'text-gray-300' : 'text-gray-700'}>Rating:</label>
-                  <select
-                    value={ratingFilter}
-                    onChange={(e) => setRatingFilter(e.target.value)}
-                    className={`p-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-400 ${
-                      isDarkMode ? 'bg-gray-600 text-white border-gray-500' : 'bg-white text-gray-900 border-gray-300'
-                    }`}
-                  >
-                    <option value="all" className="bg-gray-700">All Ratings</option>
-                    <option value="4.5" className="bg-gray-700">4.5+ ⭐</option>
-                    <option value="4.0" className="bg-gray-700">4.0+ ⭐</option>
-                    <option value="3.5" className="bg-gray-700">3.5+ ⭐</option>
-                    <option value="3.0" className="bg-gray-700">3.0+ ⭐</option>
-                  </select>
-                </div>
+                  </div>
+                )}
               </div>
 
-              <div className="text-sm text-gray-400">
-                <p>Try searching for: fruits (apple, orange), vegetables, snacks, or supermarket names (Coles, Woolworths)</p>
+              <div className="flex justify-center">
+                <button
+                  onClick={() => setShowFilters(!showFilters)}
+                  className={`px-4 py-2 rounded-lg ${
+                    isDarkMode ? 'bg-gray-600 hover:bg-gray-700' : 'bg-gray-200 hover:bg-gray-300'
+                  }`}
+                >
+                  {showFilters ? 'Hide Filters' : 'Show Filters'}
+                </button>
               </div>
+
+              {showFilters && (
+                <div className="flex flex-wrap gap-4 justify-center">
+                  <div className="flex items-center gap-2">
+                    <label className={isDarkMode ? 'text-gray-300' : 'text-gray-700'}>Category:</label>
+                    <select
+                      value={selectedCategory}
+                      onChange={(e) => setSelectedCategory(e.target.value)}
+                      className={`p-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-400 ${
+                        isDarkMode ? 'bg-gray-600 text-white border-gray-500' : 'bg-white text-gray-900 border-gray-300'
+                      }`}
+                    >
+                      <option value="all">All Categories</option>
+                      {Object.entries(STORE_CATEGORIES).map(([category, data]) => (
+                        <option key={category} value={category}>
+                          {category.charAt(0).toUpperCase() + category.slice(1)}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <label className={isDarkMode ? 'text-gray-300' : 'text-gray-700'}>Sort by:</label>
+                    <select
+                      value={sortBy}
+                      onChange={(e) => setSortBy(e.target.value)}
+                      className={`p-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-400 ${
+                        isDarkMode ? 'bg-gray-600 text-white border-gray-500' : 'bg-white text-gray-900 border-gray-300'
+                      }`}
+                    >
+                      {Object.entries(SORT_OPTIONS).map(([value, label]) => (
+                        <option key={value} value={value}>{label}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <label className={isDarkMode ? 'text-gray-300' : 'text-gray-700'}>Price:</label>
+                    <select
+                      value={priceFilter}
+                      onChange={(e) => setPriceFilter(e.target.value)}
+                      className={`p-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-400 ${
+                        isDarkMode ? 'bg-gray-600 text-white border-gray-500' : 'bg-white text-gray-900 border-gray-300'
+                      }`}
+                    >
+                      <option value="all">All Prices</option>
+                      <option value="1">$</option>
+                      <option value="2">$$</option>
+                      <option value="3">$$$</option>
+                      <option value="4">$$$$</option>
+                    </select>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <label className={isDarkMode ? 'text-gray-300' : 'text-gray-700'}>Rating:</label>
+                    <select
+                      value={ratingFilter}
+                      onChange={(e) => setRatingFilter(e.target.value)}
+                      className={`p-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-400 ${
+                        isDarkMode ? 'bg-gray-600 text-white border-gray-500' : 'bg-white text-gray-900 border-gray-300'
+                      }`}
+                    >
+                      <option value="all">All Ratings</option>
+                      <option value="4.5">4.5+ ⭐</option>
+                      <option value="4.0">4.0+ ⭐</option>
+                      <option value="3.5">3.5+ ⭐</option>
+                      <option value="3.0">3.0+ ⭐</option>
+                    </select>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
@@ -395,196 +728,115 @@ function App() {
             </div>
           )}
 
-          {isLoaded && !mapError && (
+          {showAssistant && (
+            <div className={`fixed bottom-4 right-4 max-w-md ${isDarkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-lg p-4`}>
+              <div className="flex justify-between items-start mb-2">
+                <h3 className="font-bold text-blue-400">AI Assistant</h3>
+                <button
+                  onClick={() => setShowAssistant(false)}
+                  className="text-gray-400 hover:text-gray-200"
+                >
+                  ✕
+                </button>
+              </div>
+              <p className={`mb-4 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                {isTyping ? '...' : assistantMessage}
+              </p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => handleAssistantResponse("I'll help you find alternatives. What type of items are you looking for?")}
+                  className={`px-4 py-2 rounded-lg ${
+                    isDarkMode ? 'bg-blue-600 hover:bg-blue-700' : 'bg-blue-500 hover:bg-blue-600'
+                  } text-white`}
+                >
+                  Help me
+                </button>
+                <button
+                  onClick={() => setShowAssistant(false)}
+                  className={`px-4 py-2 rounded-lg ${
+                    isDarkMode ? 'bg-gray-600 hover:bg-gray-700' : 'bg-gray-200 hover:bg-gray-300'
+                  }`}
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          )}
+
+          {center && (
             <div className="bg-gray-700 rounded-lg shadow-md p-4 mb-4">
-              <GoogleMap
-                mapContainerStyle={containerStyle}
+              <div className="flex justify-between items-center mb-2">
+                <button
+                  onClick={() => setIsSatelliteView(!isSatelliteView)}
+                  className={`px-4 py-2 rounded-lg ${
+                    isDarkMode ? 'bg-blue-600 hover:bg-blue-700' : 'bg-blue-500 hover:bg-blue-600'
+                  } text-white`}
+                >
+                  {isSatelliteView ? '🗺️ Normal View' : '🛰️ Satellite View'}
+                </button>
+              </div>
+              <MapContainer
                 center={center}
-                zoom={13}
-                onLoad={onLoad}
-                onUnmount={onUnmount}
-                options={{
-                  styles: [
-                    {
-                      "featureType": "all",
-                      "elementType": "labels.text.fill",
-                      "stylers": [
-                        {
-                          "color": "#ffffff"
-                        }
-                      ]
-                    },
-                    {
-                      "featureType": "all",
-                      "elementType": "labels.text.stroke",
-                      "stylers": [
-                        {
-                          "visibility": "on"
-                        },
-                        {
-                          "color": "#000000"
-                        },
-                        {
-                          "weight": 2
-                        }
-                      ]
-                    },
-                    {
-                      "featureType": "all",
-                      "elementType": "labels.icon",
-                      "stylers": [
-                        {
-                          "visibility": "off"
-                        }
-                      ]
-                    },
-                    {
-                      "featureType": "administrative",
-                      "elementType": "geometry.fill",
-                      "stylers": [
-                        {
-                          "color": "#000000"
-                        }
-                      ]
-                    },
-                    {
-                      "featureType": "administrative",
-                      "elementType": "geometry.stroke",
-                      "stylers": [
-                        {
-                          "color": "#144b53"
-                        },
-                        {
-                          "weight": 1
-                        }
-                      ]
-                    },
-                    {
-                      "featureType": "landscape",
-                      "elementType": "all",
-                      "stylers": [
-                        {
-                          "color": "#08304b"
-                        }
-                      ]
-                    },
-                    {
-                      "featureType": "poi",
-                      "elementType": "geometry",
-                      "stylers": [
-                        {
-                          "color": "#0c4152"
-                        }
-                      ]
-                    },
-                    {
-                      "featureType": "road.highway",
-                      "elementType": "geometry.fill",
-                      "stylers": [
-                        {
-                          "color": "#000000"
-                        }
-                      ]
-                    },
-                    {
-                      "featureType": "road.highway",
-                      "elementType": "geometry.stroke",
-                      "stylers": [
-                        {
-                          "color": "#0b434f"
-                        }
-                      ]
-                    },
-                    {
-                      "featureType": "road.arterial",
-                      "elementType": "geometry.fill",
-                      "stylers": [
-                        {
-                          "color": "#000000"
-                        }
-                      ]
-                    },
-                    {
-                      "featureType": "road.arterial",
-                      "elementType": "geometry.stroke",
-                      "stylers": [
-                        {
-                          "color": "#0b3d51"
-                        }
-                      ]
-                    },
-                    {
-                      "featureType": "road.local",
-                      "elementType": "geometry",
-                      "stylers": [
-                        {
-                          "color": "#000000"
-                        }
-                      ]
-                    },
-                    {
-                      "featureType": "transit",
-                      "elementType": "all",
-                      "stylers": [
-                        {
-                          "color": "#146474"
-                        }
-                      ]
-                    },
-                    {
-                      "featureType": "water",
-                      "elementType": "all",
-                      "stylers": [
-                        {
-                          "color": "#021019"
-                        }
-                      ]
-                    }
-                  ]
-                }}
+                zoom={15}
+                style={containerStyle}
+                scrollWheelZoom={true}
+                zoomControl={false}
               >
-                {filteredResults.map((business) => (
-                  <Marker
-                    key={business.id}
-                    position={{
-                      lat: business.coordinates.latitude,
-                      lng: business.coordinates.longitude
-                    }}
-                    onClick={() => setSelectedStore(business)}
-                    icon={{
-                      url: "https://maps.google.com/mapfiles/ms/icons/blue-dot.png"
-                    }}
+                <ChangeView center={center} />
+                <ZoomControl position="bottomright" />
+                {isSatelliteView ? (
+                  <TileLayer
+                    attribution='&copy; <a href="https://www.esri.com/">Esri</a>'
+                    url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
                   />
-                ))}
-                
-                {selectedStore && (
-                  <InfoWindow
-                    position={{
-                      lat: selectedStore.coordinates.latitude,
-                      lng: selectedStore.coordinates.longitude
-                    }}
-                    onCloseClick={() => setSelectedStore(null)}
-                  >
-                    {renderStoreInfo(selectedStore)}
-                  </InfoWindow>
+                ) : (
+                  <TileLayer
+                    attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                    url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                  />
                 )}
-              </GoogleMap>
+                <Circle
+                  center={center}
+                  radius={1000}
+                  pathOptions={{ color: 'blue', fillColor: 'blue', fillOpacity: 0.1 }}
+                />
+                {filteredResults.map((store) => (
+                  <Marker
+                    key={store.id}
+                    position={[store.coordinates.latitude, store.coordinates.longitude]}
+                    eventHandlers={{
+                      click: () => handleMarkerClick(store),
+                    }}
+                  >
+                    <Popup>
+                      <div className="bg-gray-800 text-white p-2">
+                        <h3 className="font-bold text-blue-400">{store.name}</h3>
+                        <p className="text-sm text-gray-400">{store.category}</p>
+                        <p>⭐ {store.rating.toFixed(1)}</p>
+                        <p>💰 {store.price}</p>
+                        <p>📍 {(store.distance * 1000).toFixed(0)} m</p>
+                      </div>
+                    </Popup>
+                  </Marker>
+                ))}
+              </MapContainer>
             </div>
           )}
 
           <div className="mt-4">
-            {filteredResults.map((business) => (
+            {filteredResults.map((store) => (
               <div 
-                key={business.id} 
+                key={store.id} 
                 className="bg-gray-700 rounded-lg p-4 mb-4 hover:bg-gray-600 cursor-pointer transition-colors" 
-                onClick={() => setSelectedStore(business)}
+                onClick={() => setSelectedStore(store)}
               >
-                <h3 className="text-xl font-semibold text-blue-400">{business.name}</h3>
-                <p className="text-gray-300">{business.location.address1}</p>
+                <h3 className="text-xl font-semibold text-blue-400">{store.name}</h3>
+                <p className="text-sm text-gray-400">{store.category}</p>
+                <p className="text-gray-300">{store.vicinity}</p>
                 <div className="flex gap-4 mt-2">
-                  <span className="text-yellow-400">⭐ {business.rating}</span>
-                  <span className="text-green-400">💰 {business.price || 'N/A'}</span>
-                  <span className="text-gray-400">📍 {(business.distance / 1000).toFixed(1)} km</span>
+                  <span className="text-yellow-400">⭐ {store.rating.toFixed(1)}</span>
+                  <span className="text-green-400">💰 {store.price}</span>
+                  <span className="text-gray-400">📍 {(store.distance * 1000).toFixed(0)} m</span>
                 </div>
               </div>
             ))}
@@ -594,126 +846,7 @@ function App() {
 
       {selectedStore && (
         <div className={`fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50`}>
-          <div className={`p-6 rounded-lg max-w-md w-full mx-4 ${isDarkMode ? 'bg-gray-800' : 'bg-white'}`}>
-            <div className="flex justify-between items-start mb-4">
-              <h3 className={`text-xl font-bold ${isDarkMode ? 'text-blue-400' : 'text-blue-600'}`}>
-                {selectedStore.name}
-              </h3>
-              <button
-                onClick={() => setSelectedStore(null)}
-                className={`p-2 rounded-lg ${isDarkMode ? 'text-gray-400 hover:text-white' : 'text-gray-500 hover:text-gray-700'}`}
-              >
-                ✕
-              </button>
-            </div>
-
-            <div className="mb-4">
-              <p className={isDarkMode ? 'text-gray-300' : 'text-gray-600'}>
-                {selectedStore.vicinity || selectedStore.formatted_address}
-              </p>
-              <div className="flex items-center mt-2">
-                <span className="text-yellow-400">⭐ {selectedStore.rating || 'N/A'}</span>
-                {selectedStore.price_level && (
-                  <span className="ml-2 text-green-400">
-                    {'$'.repeat(selectedStore.price_level)}
-                  </span>
-                )}
-              </div>
-            </div>
-
-            {!showReviewForm ? (
-              <button
-                onClick={() => setShowReviewForm(true)}
-                className={`w-full py-2 rounded-lg mb-4 ${
-                  isDarkMode ? 'bg-blue-600 hover:bg-blue-700' : 'bg-blue-500 hover:bg-blue-600'
-                } text-white`}
-              >
-                Write a Review
-              </button>
-            ) : (
-              <form onSubmit={handleReviewSubmit} className="mb-4">
-                <div className="mb-4">
-                  <label className={`block mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
-                    Rating
-                  </label>
-                  <div className="flex space-x-2">
-                    {[1, 2, 3, 4, 5].map((star) => (
-                      <button
-                        key={star}
-                        type="button"
-                        onClick={() => setReviewRating(star)}
-                        className={`text-2xl ${star <= reviewRating ? 'text-yellow-400' : 'text-gray-400'}`}
-                      >
-                        ⭐
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                <div className="mb-4">
-                  <textarea
-                    value={reviewText}
-                    onChange={(e) => setReviewText(e.target.value)}
-                    placeholder="Write your review..."
-                    className={`w-full p-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-400 ${
-                      isDarkMode ? 'bg-gray-600 text-white' : 'bg-white text-gray-900'
-                    }`}
-                    rows="4"
-                  />
-                </div>
-                <div className="flex space-x-2">
-                  <button
-                    type="submit"
-                    className={`flex-1 py-2 rounded-lg ${
-                      isDarkMode ? 'bg-blue-600 hover:bg-blue-700' : 'bg-blue-500 hover:bg-blue-600'
-                    } text-white`}
-                  >
-                    Submit Review
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setShowReviewForm(false)}
-                    className={`flex-1 py-2 rounded-lg ${
-                      isDarkMode ? 'bg-gray-600 hover:bg-gray-700' : 'bg-gray-200 hover:bg-gray-300'
-                    }`}
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </form>
-            )}
-
-            <div className="mt-4">
-              <h4 className={`font-bold mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
-                Reviews
-              </h4>
-              {getStoreReviews(selectedStore.id).length > 0 ? (
-                getStoreReviews(selectedStore.id).map((review) => (
-                  <div
-                    key={review.id}
-                    className={`p-3 rounded-lg mb-2 ${
-                      isDarkMode ? 'bg-gray-700' : 'bg-gray-100'
-                    }`}
-                  >
-                    <div className="flex items-center mb-1">
-                      <span className="text-yellow-400 mr-2">
-                        {'⭐'.repeat(review.rating)}
-                      </span>
-                      <span className={`text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                        {review.date}
-                      </span>
-                    </div>
-                    <p className={isDarkMode ? 'text-gray-300' : 'text-gray-700'}>
-                      {review.text}
-                    </p>
-                  </div>
-                ))
-              ) : (
-                <p className={isDarkMode ? 'text-gray-400' : 'text-gray-500'}>
-                  No reviews yet. Be the first to review!
-                </p>
-              )}
-            </div>
-          </div>
+          {renderStoreDetails(selectedStore)}
         </div>
       )}
     </div>
