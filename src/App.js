@@ -274,7 +274,7 @@ function App() {
       // Add location context to improve search results
       const [lat, lng] = center;
       const response = await fetch(
-        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
+        `https://corsproxy.io/?https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
           searchQuery
         )}&limit=30&bounded=1&viewbox=${lng-0.01},${lat+0.01},${lng+0.01},${lat-0.01}&addressdetails=1`
       );
