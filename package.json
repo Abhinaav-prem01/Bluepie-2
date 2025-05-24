@@ -39,11 +39,12 @@
       "last 1 firefox version",
       "last 1 safari version"
     ]
-    
-  }
-  build: {
+    build: {
   rollupOptions: {
     external: ['leaflet'],
   },
-},
+    
+  }
+  
+}
 } 
